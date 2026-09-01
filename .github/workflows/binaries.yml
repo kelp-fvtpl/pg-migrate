@@ -1,0 +1,55 @@
+name: Build binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux targets cross-compile fine from one runner. macOS targets are
+          # built on macOS so pkg ad-hoc signs them with the platform toolchain
+          # -- an unsigned macOS binary is killed on launch on Apple Silicon.
+          - runner: ubuntu-latest
+            targets: pg-migrate-linux-x64 pg-migrate-linux-arm64
+            name: linux
+          - runner: macos-latest
+            targets: pg-migrate-macos-arm64 pg-migrate-macos-x64
+            name: macos
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run package -- ${{ matrix.targets }}
+      - name: Smoke test each binary
+        run: |
+          set -euo pipefail
+          for f in build/pg-migrate-*; do file "$f"; done
+          # Only a binary matching this host can actually be executed here.
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) native=build/pg-migrate-linux-x64 ;;
+            Darwin-arm64) native=build/pg-migrate-macos-arm64 ;;
+            *) native="" ;;
+          esac
+          if [ -n "$native" ] && [ -f "$native" ]; then
+            out="$("$native" 2>&1 || true)"
+            printf '%s' "$out" | grep -q DB_NAME || { echo "unexpected: $out"; exit 1; }
+            echo "ran OK: $native"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg-migrate-${{ matrix.name }}
+          path: |
+            build/pg-migrate-*
+            build/SHA256SUMS
+          if-no-files-found: error
